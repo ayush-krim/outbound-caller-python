@@ -37,6 +37,7 @@ logger.setLevel(logging.INFO)
 outbound_trunk_id = os.getenv("SIP_OUTBOUND_TRUNK_ID")
 
 
+
 class OutboundCaller(Agent):
     def __init__(
         self,
@@ -51,6 +52,8 @@ class OutboundCaller(Agent):
             You will be on a call with a patient who has an upcoming appointment. Your goal is to confirm the appointment details.
             As a customer service representative, you will be polite and professional at all times. Allow user to end the conversation.
 
+            IMPORTANT: Start the conversation immediately with: "Hello {name}, this is your dental office calling about your appointment {appointment_time}."
+            
             When the user would like to be transferred to a human agent, first confirm with them. upon confirmation, use the transfer_call tool.
             The customer's name is {name}. His appointment is on {appointment_time}.
             """
@@ -181,16 +184,12 @@ async def entrypoint(ctx: JobContext):
         dial_info=dial_info,
     )
 
-    # the following uses GPT-4o, Deepgram and Cartesia
+    # ULTRA-FAST: Use OpenAI Realtime API (speech-to-speech)
     session = AgentSession(
-        turn_detection=EnglishModel(),
-        vad=silero.VAD.load(),
-        stt=deepgram.STT(),
-        # you can also use OpenAI's TTS with openai.TTS()
-        tts=cartesia.TTS(),
-        llm=openai.LLM(model="gpt-4o"),
-        # you can also use a speech-to-speech model like OpenAI's Realtime API
-        # llm=openai.realtime.RealtimeModel()
+        # Single model handles everything - eliminates pipeline delays
+        llm=openai.realtime.RealtimeModel(
+            voice="alloy",
+        ),
     )
 
     # start the session first before dialing, to ensure that when the user picks up
@@ -239,6 +238,6 @@ if __name__ == "__main__":
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
-            agent_name="outbound-caller",
+            agent_name="outbound-caller-local",
         )
     )
