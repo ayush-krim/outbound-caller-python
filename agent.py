@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 import json
 import os
 from typing import Any
+import time
 
 from livekit import rtc, api
 from livekit.agents import (
@@ -62,9 +63,12 @@ class OutboundCaller(Agent):
         self.participant: rtc.RemoteParticipant | None = None
 
         self.dial_info = dial_info
+        self.start_time = time.time()
 
     def set_participant(self, participant: rtc.RemoteParticipant):
         self.participant = participant
+        # Start 180 second timer when participant joins
+        asyncio.create_task(self._timeout_handler())
 
     async def hangup(self):
         """Helper function to hang up the call by deleting the room"""
@@ -165,10 +169,22 @@ class OutboundCaller(Agent):
         logger.info(f"detected answering machine for {self.participant.identity}")
         await self.hangup()
 
+    async def _timeout_handler(self):
+        """Automatically hang up the call after 180 seconds"""
+        await asyncio.sleep(180)
+        logger.info("Call reached 180 second limit, hanging up")
+        await self.hangup()
+
 
 async def entrypoint(ctx: JobContext):
+    start_time = time.time()
+    logger.info(f"[TIMING] Starting entrypoint for room {ctx.room.name}")
+    
+    room_conn_start = time.time()
     logger.info(f"connecting to room {ctx.room.name}")
     await ctx.connect()
+    room_conn_time = time.time() - room_conn_start
+    logger.info(f"[TIMING] Room connection: {room_conn_time:.3f}s")
 
     # when dispatching the agent, we'll pass it the approriate info to dial the user
     # dial_info is a dict with the following keys:
@@ -178,19 +194,25 @@ async def entrypoint(ctx: JobContext):
     participant_identity = phone_number = dial_info["phone_number"]
 
     # look up the user's phone number and appointment details
+    agent_create_start = time.time()
     agent = OutboundCaller(
         name="Jayden",
         appointment_time="next Tuesday at 3pm",
         dial_info=dial_info,
     )
+    agent_create_time = time.time() - agent_create_start
+    logger.info(f"[TIMING] Agent creation: {agent_create_time:.3f}s")
 
     # ULTRA-FAST: Use OpenAI Realtime API (speech-to-speech)
+    session_create_start = time.time()
     session = AgentSession(
         # Single model handles everything - eliminates pipeline delays
         llm=openai.realtime.RealtimeModel(
-            voice="alloy",
+            voice="echo",  # OPTIMIZATION 2: Use fastest voice model
         ),
     )
+    session_create_time = time.time() - session_create_start
+    logger.info(f"[TIMING] Session creation: {session_create_time:.3f}s")
 
     # start the session first before dialing, to ensure that when the user picks up
     # the agent does not miss anything the user says
@@ -200,13 +222,15 @@ async def entrypoint(ctx: JobContext):
             room=ctx.room,
             room_input_options=RoomInputOptions(
                 # enable Krisp background voice and noise removal
-                noise_cancellation=noise_cancellation.BVCTelephony(),
+                # OPTIMIZATION 1: Removed noise cancellation
             ),
         )
     )
 
     # `create_sip_participant` starts dialing the user
     try:
+        sip_dial_start = time.time()
+        logger.info(f"[TIMING] Starting SIP dial to {phone_number}")
         await ctx.api.sip.create_sip_participant(
             api.CreateSIPParticipantRequest(
                 room_name=ctx.room.name,
@@ -217,6 +241,8 @@ async def entrypoint(ctx: JobContext):
                 wait_until_answered=True,
             )
         )
+        sip_dial_time = time.time() - sip_dial_start
+        logger.info(f"[TIMING] SIP dial completed: {sip_dial_time:.3f}s")
 
         # wait for the agent session start and participant join
         await session_started
@@ -224,6 +250,10 @@ async def entrypoint(ctx: JobContext):
         logger.info(f"participant joined: {participant.identity}")
 
         agent.set_participant(participant)
+        
+        total_time = time.time() - start_time
+        logger.info(f"[TIMING] Total connection time: {total_time:.3f}s")
+        logger.info(f"[TIMING BREAKDOWN] Room: {room_conn_time:.3f}s, Agent: {agent_create_time:.3f}s, Session: {session_create_time:.3f}s, SIP: {sip_dial_time:.3f}s")
 
     except api.TwirpError as e:
         logger.error(
