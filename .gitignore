@@ -1,3 +1,17 @@
 .env.local
 venv/
 .DS_Store
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.db
+*.sqlite
+*.sqlite3
+alembic.ini.local
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+*.log

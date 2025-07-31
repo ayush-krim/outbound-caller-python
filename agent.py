@@ -7,6 +7,7 @@ import json
 import os
 from typing import Any
 import time
+from datetime import datetime, timezone
 
 from livekit import rtc, api
 from livekit.agents import (
@@ -29,6 +30,10 @@ from livekit.plugins import (
 )
 from livekit.plugins.turn_detector.english import EnglishModel
 
+# Import database tracker
+from database.tracker import CallTracker
+from database.config import init_db
+
 
 # load environment variables, this is optional, only used for local development
 load_dotenv(dotenv_path=".env.local")
@@ -46,6 +51,7 @@ class OutboundCaller(Agent):
         name: str,
         appointment_time: str,
         dial_info: dict[str, Any],
+        tracker: CallTracker = None,
     ):
         super().__init__(
             instructions=f"""
@@ -64,14 +70,24 @@ class OutboundCaller(Agent):
 
         self.dial_info = dial_info
         self.start_time = time.time()
+        self.tracker = tracker
 
     def set_participant(self, participant: rtc.RemoteParticipant):
         self.participant = participant
+        # Track participant join event
+        if self.tracker:
+            self.tracker.record_timestamp("participant_joined")
+            asyncio.create_task(self.tracker.record_event("participant_joined", {"identity": participant.identity}))
         # Start 180 second timer when participant joins
         asyncio.create_task(self._timeout_handler())
 
     async def hangup(self):
         """Helper function to hang up the call by deleting the room"""
+        
+        # Track call end before hanging up
+        if self.tracker:
+            self.tracker.record_timestamp("call_end")
+            await self.tracker.update_interaction_metrics()
 
         job_ctx = get_job_context()
         await job_ctx.api.room.delete_room(
@@ -89,6 +105,10 @@ class OutboundCaller(Agent):
             return "cannot transfer call"
 
         logger.info(f"transferring call to {transfer_to}")
+        
+        # Track transfer request
+        if self.tracker:
+            await self.tracker.record_event("transfer_requested", {"transfer_to": transfer_to})
 
         # let the message play fully before transferring
         await ctx.session.generate_reply(
@@ -106,8 +126,14 @@ class OutboundCaller(Agent):
             )
 
             logger.info(f"transferred call to {transfer_to}")
+            # Track successful transfer
+            if self.tracker:
+                await self.tracker.record_event("transfer_completed", {"transfer_to": transfer_to})
         except Exception as e:
             logger.error(f"error transferring call: {e}")
+            # Track failed transfer
+            if self.tracker:
+                await self.tracker.record_event("transfer_failed", {"error": str(e)})
             await ctx.session.generate_reply(
                 instructions="there was an error transferring the call."
             )
@@ -167,6 +193,9 @@ class OutboundCaller(Agent):
     async def detected_answering_machine(self, ctx: RunContext):
         """Called when the call reaches voicemail. Use this tool AFTER you hear the voicemail greeting"""
         logger.info(f"detected answering machine for {self.participant.identity}")
+        # Track voicemail detection
+        if self.tracker:
+            await self.tracker.record_event("voicemail_detected", {"identity": self.participant.identity})
         await self.hangup()
 
     async def _timeout_handler(self):
@@ -180,31 +209,55 @@ async def entrypoint(ctx: JobContext):
     start_time = time.time()
     logger.info(f"[TIMING] Starting entrypoint for room {ctx.room.name}")
     
-    room_conn_start = time.time()
-    logger.info(f"connecting to room {ctx.room.name}")
-    await ctx.connect()
-    room_conn_time = time.time() - room_conn_start
-    logger.info(f"[TIMING] Room connection: {room_conn_time:.3f}s")
-
+    # Initialize database tables if needed
+    try:
+        await init_db()
+        logger.info("Database connection established")
+    except Exception as e:
+        logger.warning(f"Database not available: {e}. Calls will run without tracking.")
+    
     # when dispatching the agent, we'll pass it the approriate info to dial the user
     # dial_info is a dict with the following keys:
     # - phone_number: the phone number to dial
     # - transfer_to: the phone number to transfer the call to when requested
     dial_info = json.loads(ctx.job.metadata)
     participant_identity = phone_number = dial_info["phone_number"]
+    
+    # Create tracker for this call
+    tracker = CallTracker(
+        dispatch_id=ctx.job.id,
+        room_name=ctx.room.name,
+        phone_number=phone_number,
+        transfer_to=dial_info.get("transfer_to"),
+        agent_name="outbound-caller"
+    )
+    await tracker.initialize()
+    tracker.record_timestamp("dispatch_accepted")
+    
+    room_conn_start = time.time()
+    tracker.record_timestamp("room_connection_start")
+    logger.info(f"connecting to room {ctx.room.name}")
+    await ctx.connect()
+    room_conn_time = time.time() - room_conn_start
+    tracker.record_timestamp("room_connection_completed")
+    logger.info(f"[TIMING] Room connection: {room_conn_time:.3f}s")
 
     # look up the user's phone number and appointment details
     agent_create_start = time.time()
+    tracker.record_timestamp("agent_init_start")
     agent = OutboundCaller(
         name="Jayden",
         appointment_time="next Tuesday at 3pm",
         dial_info=dial_info,
+        tracker=tracker,
     )
     agent_create_time = time.time() - agent_create_start
+    tracker.record_timestamp("agent_init_completed")
     logger.info(f"[TIMING] Agent creation: {agent_create_time:.3f}s")
 
     # ULTRA-FAST: Use OpenAI Realtime API (speech-to-speech)
     session_create_start = time.time()
+    tracker.record_timestamp("session_creation_start")
     session = AgentSession(
         # Single model handles everything - eliminates pipeline delays
         llm=openai.realtime.RealtimeModel(
@@ -212,6 +265,7 @@ async def entrypoint(ctx: JobContext):
         ),
     )
     session_create_time = time.time() - session_create_start
+    tracker.record_timestamp("session_creation_completed")
     logger.info(f"[TIMING] Session creation: {session_create_time:.3f}s")
 
     # start the session first before dialing, to ensure that when the user picks up
@@ -230,6 +284,7 @@ async def entrypoint(ctx: JobContext):
     # `create_sip_participant` starts dialing the user
     try:
         sip_dial_start = time.time()
+        tracker.record_timestamp("sip_dial_start")
         logger.info(f"[TIMING] Starting SIP dial to {phone_number}")
         await ctx.api.sip.create_sip_participant(
             api.CreateSIPParticipantRequest(
@@ -242,6 +297,9 @@ async def entrypoint(ctx: JobContext):
             )
         )
         sip_dial_time = time.time() - sip_dial_start
+        tracker.record_timestamp("sip_dial_completed")
+        tracker.record_timestamp("call_answered")
+        tracker.record_timestamp("call_start")
         logger.info(f"[TIMING] SIP dial completed: {sip_dial_time:.3f}s")
 
         # wait for the agent session start and participant join
@@ -254,6 +312,17 @@ async def entrypoint(ctx: JobContext):
         total_time = time.time() - start_time
         logger.info(f"[TIMING] Total connection time: {total_time:.3f}s")
         logger.info(f"[TIMING BREAKDOWN] Room: {room_conn_time:.3f}s, Agent: {agent_create_time:.3f}s, Session: {session_create_time:.3f}s, SIP: {sip_dial_time:.3f}s")
+        
+        # Update connection metrics
+        await tracker.update_connection_metrics()
+        
+        # Wait for call to end
+        await ctx.wait_for_room_close()
+        
+        # Finalize tracking
+        tracker.record_timestamp("call_end")
+        await tracker.update_interaction_metrics()
+        await tracker.finalize(status="completed", end_reason="normal")
 
     except api.TwirpError as e:
         logger.error(
@@ -261,6 +330,13 @@ async def entrypoint(ctx: JobContext):
             f"SIP status: {e.metadata.get('sip_status_code')} "
             f"{e.metadata.get('sip_status')}"
         )
+        # Track failed call
+        if 'tracker' in locals():
+            await tracker.record_event("call_failed", {
+                "error": e.message,
+                "sip_status": e.metadata.get('sip_status_code')
+            })
+            await tracker.finalize(status="failed", end_reason=e.message)
         ctx.shutdown()
 
 
