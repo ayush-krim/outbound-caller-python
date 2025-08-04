@@ -33,7 +33,16 @@ async def dispatch_job(phone_number: str):
         agent_name="outbound-caller-local",
         metadata=json.dumps({
             "phone_number": f"+1 507 626 9649,{phone_number}",  # Format: "from_number,to_number"
-            "transfer_to": "+1 507 626 9649"
+            "transfer_to": "+1 507 626 9649",
+            "account_info": {
+                "customer_name": "John Smith",
+                "last_4_digits": "4532",
+                "emi_amount": 1500,
+                "days_past_due": 15,
+                "total_balance": 47250,
+                "late_fee": 250,
+                "apr": 8.75
+            }
         }),
     )
     print(f"Job dispatched: {job.id}")

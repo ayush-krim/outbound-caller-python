@@ -7,6 +7,7 @@ import json
 import os
 from typing import Any
 import time
+from datetime import datetime
 
 from livekit import rtc, api
 from livekit.agents import (
@@ -47,16 +48,54 @@ class OutboundCaller(Agent):
         appointment_time: str,
         dial_info: dict[str, Any],
     ):
+        # Determine time of day
+        current_hour = datetime.now().hour
+        time_of_day = "morning" if current_hour < 12 else "afternoon" if current_hour < 17 else "evening"
+        
+        # Extract account info from dial_info if available
+        account_info = dial_info.get('account_info', {})
+        customer_name = account_info.get('customer_name', name)
+        last_4_digits = account_info.get('last_4_digits', '0000')
+        emi_amount = account_info.get('emi_amount', 1500)
+        days_past_due = account_info.get('days_past_due', 30)
+        
         super().__init__(
             instructions=f"""
-            You are a scheduling assistant for a dental practice. Your interface with user will be voice.
-            You will be on a call with a patient who has an upcoming appointment. Your goal is to confirm the appointment details.
-            As a customer service representative, you will be polite and professional at all times. Allow user to end the conversation.
-
-            IMPORTANT: Start the conversation immediately with: "Hello {name}, this is your dental office calling about your appointment {appointment_time}."
+            You are Sarah from XYZ Bank calling about overdue monthly payment.
             
-            When the user would like to be transferred to a human agent, first confirm with them. upon confirmation, use the transfer_call tool.
-            The customer's name is {name}. His appointment is on {appointment_time}.
+            CRITICAL: Be concise. Short responses. Natural conversation.
+            
+            Customer: {customer_name}
+            Account: ***{last_4_digits}
+            Overdue: ${emi_amount} ({days_past_due} days)
+            Minimum payment: ${emi_amount * 0.5} (50% of monthly payment)
+            
+            CONVERSATION STEPS:
+            1. "Good {time_of_day}, this is Sarah from XYZ Bank. Am I speaking with {customer_name}?"
+            2. "Your monthly payment of ${emi_amount} is past due. Can we resolve this today?"
+            3. Listen to their situation briefly
+            4. Offer ONE solution at a time:
+               - Full payment today
+               - Partial payment now
+               - Payment plan
+            
+            NEGOTIATION RULES:
+            - If customer asks for more than 2 days: "I understand you need time. How about we settle this within 2 days instead?"
+            - If customer says they can't pay full amount: "I hear you. Let's work together - can you manage ${emi_amount * 0.5} today?"
+            - Minimum acceptable payment is 50% (${emi_amount * 0.5}). If offered less: "I appreciate the effort, but we need at least ${emi_amount * 0.5} to help your account."
+            - If customer mentions hardship: "I'm sorry to hear that. Let me see how I can help. Can you manage even ${emi_amount * 0.5} to keep your account active?"
+            - If customer says they'll pay online: "Perfect! I'll share the payment link right now."
+            
+            RESPONSES MUST BE:
+            - Under 2 sentences
+            - Empathetic but persuasive
+            - Focus on immediate action
+            
+            If asked about account details, use check_account_balance tool.
+            If they agree to pay, use process_payment tool.
+            Only use transfer_call tool AFTER trying to help with hardship cases first.
+            
+            NEVER lecture. NEVER threaten. Keep it conversational.
             """
         )
         # keep reference to the participant for transfers
@@ -126,42 +165,57 @@ class OutboundCaller(Agent):
         await self.hangup()
 
     @function_tool()
-    async def look_up_availability(
+    async def check_account_balance(
         self,
         ctx: RunContext,
-        date: str,
     ):
-        """Called when the user asks about alternative appointment availability
-
-        Args:
-            date: The date of the appointment to check availability for
-        """
-        logger.info(
-            f"looking up availability for {self.participant.identity} on {date}"
-        )
-        await asyncio.sleep(3)
-        return {
-            "available_times": ["1pm", "2pm", "3pm"],
-        }
+        """Called when customer asks about their account details, balance, or payment history"""
+        account_info = self.dial_info.get('account_info', {})
+        logger.info(f"checking account balance for {self.participant.identity}")
+        
+        total_balance = account_info.get('total_balance', 47250)
+        emi_amount = account_info.get('emi_amount', 1500)
+        late_fee = account_info.get('late_fee', 250)
+        apr = account_info.get('apr', 8.75)
+        
+        return f"Total balance: ${total_balance}. Past due monthly payment: ${emi_amount}. Late fee: ${late_fee}. APR: {apr}%"
 
     @function_tool()
-    async def confirm_appointment(
+    async def process_payment(
+        self,
+        ctx: RunContext,
+        amount: float,
+        payment_type: str = "full",
+    ):
+        """Called when customer agrees to make a payment
+        
+        Args:
+            amount: Payment amount in dollars
+            payment_type: Type of payment - 'full', 'partial', or 'plan'
+        """
+        logger.info(
+            f"processing {payment_type} payment of ${amount} for {self.participant.identity}"
+        )
+        # In production, this would integrate with payment gateway
+        return f"Payment of ${amount} processed successfully. Confirmation number: PAY{int(time.time())}"
+
+    @function_tool()
+    async def schedule_followup(
         self,
         ctx: RunContext,
         date: str,
-        time: str,
+        amount: float,
     ):
-        """Called when the user confirms their appointment on a specific date.
-        Use this tool only when they are certain about the date and time.
-
+        """Called when customer needs time to arrange funds
+        
         Args:
-            date: The date of the appointment
-            time: The time of the appointment
+            date: When to follow up
+            amount: Expected payment amount
         """
         logger.info(
-            f"confirming appointment for {self.participant.identity} on {date} at {time}"
+            f"scheduling followup with {self.participant.identity} on {date} for ${amount}"
         )
-        return "reservation confirmed"
+        return f"Followup scheduled for {date}. We'll call about your ${amount} payment."
 
     @function_tool()
     async def detected_answering_machine(self, ctx: RunContext):
@@ -191,7 +245,14 @@ async def entrypoint(ctx: JobContext):
     # - phone_number: the phone number to dial
     # - transfer_to: the phone number to transfer the call to when requested
     dial_info = json.loads(ctx.job.metadata)
-    participant_identity = phone_number = dial_info["phone_number"]
+    
+    # Extract the actual phone number to dial (format: "from_number,to_number")
+    phone_number_parts = dial_info["phone_number"].split(",")
+    if len(phone_number_parts) == 2:
+        from_number, to_number = phone_number_parts
+        participant_identity = phone_number = to_number.strip()
+    else:
+        participant_identity = phone_number = dial_info["phone_number"]
 
     # look up the user's phone number and appointment details
     agent_create_start = time.time()
@@ -208,7 +269,7 @@ async def entrypoint(ctx: JobContext):
     session = AgentSession(
         # Single model handles everything - eliminates pipeline delays
         llm=openai.realtime.RealtimeModel(
-            voice="echo",  # OPTIMIZATION 2: Use fastest voice model
+            voice="alloy",  # Young American female voice
         ),
     )
     session_create_time = time.time() - session_create_start

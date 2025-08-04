@@ -14,4 +14,4 @@ echo "Dispatching call to $PHONE_NUMBER..."
 lk dispatch create \
   --new-room \
   --agent-name outbound-caller-local \
-  --metadata "{\"phone_number\": \"$PHONE_NUMBER\", \"transfer_to\": \"+1 507 626 9649\"}"
+  --metadata "{\"phone_number\": \"$PHONE_NUMBER\", \"transfer_to\": \"+1 507 626 9649\", \"account_info\": {\"customer_name\": \"John Smith\", \"last_4_digits\": \"4532\", \"emi_amount\": 1500, \"days_past_due\": 15, \"total_balance\": 47250, \"late_fee\": 250, \"apr\": 8.75}}"

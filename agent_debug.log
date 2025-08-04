@@ -1,0 +1,5 @@
+2025-08-04 13:06:54,782 - [36mDEBUG[0m asyncio - Using selector: KqueueSelector [90m[0m
+2025-08-04 13:06:54,782 - [35mDEV [0m livekit.agents - Watching /Users/ayushkumar/Downloads/Saarthi/outbound-caller-python/outbound-caller-python [90m[0m
+2025-08-04 13:06:55,584 - [36mDEBUG[0m asyncio - Using selector: KqueueSelector [90m[0m
+2025-08-04 13:06:55,588 - [32mINFO[0m livekit.agents - starting worker [90m{"version": "1.2.2", "rtc-version": "1.0.12"}[0m
+2025-08-04 13:06:55,764 - [32mINFO[0m livekit.agents - registered worker [90m{"id": "AW_iMLTLBghUkTU", "url": "wss://voice-ai-project-qxvy2kj1.livekit.cloud", "region": "India", "protocol": 16}[0m
