@@ -10,7 +10,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Get database URL from environment
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:password@localhost:5432/outbound_caller")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://krim_ai:dev_password_change_in_production@localhost:5432/krim_ai_platform")
 
 # Convert to async URL if needed
 if DATABASE_URL.startswith("postgresql://"):
