@@ -11,8 +11,17 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from livekit import api
-import boto3
-from botocore.exceptions import ClientError
+import time
+
+# Make boto3 optional
+try:
+    import boto3
+    from botocore.exceptions import ClientError
+    BOTO3_AVAILABLE = True
+except ImportError:
+    boto3 = None
+    ClientError = None
+    BOTO3_AVAILABLE = False
 
 from database.models import CallRecording, Call
 from database.config import async_session
@@ -38,7 +47,10 @@ class RecordingManager:
         # Initialize S3 client if enabled
         self.s3_client = None
         if self.use_s3:
-            if not all([self.s3_bucket, self.s3_access_key, self.s3_secret_key]):
+            if not BOTO3_AVAILABLE:
+                logger.warning("S3 storage enabled but boto3 is not installed. Falling back to local storage.")
+                self.use_s3 = False
+            elif not all([self.s3_bucket, self.s3_access_key, self.s3_secret_key]):
                 logger.warning("S3 storage enabled but missing required credentials. Falling back to local storage.")
                 self.use_s3 = False
             else:
@@ -56,13 +68,13 @@ class RecordingManager:
             # Create base recording directory for local storage
             self.base_path.mkdir(exist_ok=True)
         else:
-            # Verify S3 bucket access
+            # Verify S3 bucket access (optional check)
             try:
                 self.s3_client.head_bucket(Bucket=self.s3_bucket)
                 logger.info(f"S3 bucket {self.s3_bucket} is accessible")
             except ClientError as e:
-                logger.error(f"Cannot access S3 bucket {self.s3_bucket}: {e}")
-                raise
+                logger.warning(f"Cannot verify S3 bucket access (this is normal if bucket permissions are restrictive): {e}")
+                logger.info(f"Proceeding with S3 recording - will attempt uploads directly")
         
     async def start_room_recording(self, room_name: str, call_id: str) -> Optional[str]:
         """
@@ -81,18 +93,40 @@ class RecordingManager:
             date_path = self.base_path / str(now.year) / f"{now.month:02d}" / f"{now.day:02d}"
             date_path.mkdir(parents=True, exist_ok=True)
             
-            # Configure room composite egress for audio recording
+            # Configure S3 output for egress
+            s3_access_key = os.getenv("AWS_ACCESS_KEY_ID")
+            s3_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+            s3_bucket = os.getenv("S3_BUCKET_NAME")
+            s3_region = os.getenv("S3_REGION", "us-east-1")
+            
+            if not all([s3_access_key, s3_secret_key, s3_bucket]):
+                logger.error("S3 credentials not configured for LiveKit Egress")
+                logger.error("Please set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and S3_BUCKET_NAME in .env.local")
+                return None
+            
+            # Generate S3 path
+            s3_key = f"egress-recordings/{now.year}/{now.month:02d}/{now.day:02d}/{room_name}_{int(time.time())}.mp4"
+            
+            # Set S3 output
+            s3_output = api.S3Upload(
+                access_key=s3_access_key,
+                secret=s3_secret_key,
+                bucket=s3_bucket,
+                region=s3_region,
+            )
+            
+            # Configure encoded file output with S3 destination
+            file_output = api.EncodedFileOutput(
+                file_type=api.EncodedFileType.MP4,
+                filepath=s3_key,
+                s3=s3_output,
+            )
+            
+            # Configure room composite egress for audio recording with S3 output
             request = api.RoomCompositeEgressRequest(
                 room_name=room_name,
                 audio_only=True,  # We only need audio for call recordings
-                file_outputs=[api.EncodedFileOutput(
-                    filepath=f"{room_name}.mp4",  # Temporary name, will be renamed later
-                    file_type=api.EncodedFileType.MP4,
-                )],
-                # High quality audio settings
-                audio_codec=api.AudioCodec.OPUS,
-                audio_bitrate=128000,  # 128 kbps for good quality
-                audio_quality=10,  # Highest quality
+                file_outputs=[file_output]  # Pass file_outputs in constructor
             )
             
             # Start the egress
