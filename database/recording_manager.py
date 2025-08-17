@@ -134,23 +134,28 @@ class RecordingManager:
             response = await self.api.egress.start_room_composite_egress(request)
             
             if response and response.egress_id:
-                # Create recording record in database
-                async with async_session() as session:
-                    recording = CallRecording(
-                        call_id=call_id,
-                        egress_id=response.egress_id,
-                        room_name=room_name,
-                        status="recording",
-                        started_at=datetime.now(timezone.utc),
-                        format="mp4",
-                    )
-                    
-                    session.add(recording)
-                    await session.commit()
+                # Try to create recording record in database, but don't fail if it doesn't work
+                try:
+                    async with async_session() as session:
+                        recording = CallRecording(
+                            call_id=call_id,
+                            egress_id=response.egress_id,
+                            room_name=room_name,
+                            status="recording",
+                            started_at=datetime.now(timezone.utc),
+                            format="mp4",
+                        )
+                        
+                        session.add(recording)
+                        await session.commit()
+                    logger.info(f"Recording database record created for egress ID: {response.egress_id}")
+                except Exception as db_error:
+                    logger.warning(f"Failed to create database record for recording, but continuing: {db_error}")
+                    # Continue with recording even if database fails
                 
                 logger.info(f"Recording started with egress ID: {response.egress_id}")
                 
-                # Start monitoring task
+                # Start monitoring task (will work even without database)
                 asyncio.create_task(self._monitor_recording(response.egress_id, call_id))
                 
                 return response.egress_id
@@ -192,17 +197,18 @@ class RecordingManager:
                 if egress.status == api.EgressStatus.EGRESS_COMPLETE:
                     logger.info(f"Recording {egress_id} completed")
                     
-                    # Get the recording from database
-                    async with async_session() as session:
-                        result = await session.execute(
-                            select(CallRecording).where(CallRecording.egress_id == egress_id)
-                        )
-                        recording = result.scalar_one_or_none()
-                        
-                        if recording:
-                            # Update with completion info
-                            recording.status = "completed"
-                            recording.completed_at = datetime.now(timezone.utc)
+                    # Try to update database, but don't fail if it doesn't work
+                    try:
+                        async with async_session() as session:
+                            result = await session.execute(
+                                select(CallRecording).where(CallRecording.egress_id == egress_id)
+                            )
+                            recording = result.scalar_one_or_none()
+                            
+                            if recording:
+                                # Update with completion info
+                                recording.status = "completed"
+                                recording.completed_at = datetime.now(timezone.utc)
                             
                             if hasattr(egress, 'file') and egress.file:
                                 # Move file to proper location
@@ -240,22 +246,30 @@ class RecordingManager:
                                 recording.duration_seconds = egress.duration / 1_000_000_000  # Convert nanoseconds
                             
                             await session.commit()
+                    except Exception as db_error:
+                        logger.warning(f"Failed to update recording database record, but recording completed: {db_error}")
+                    
+                    # Log completion regardless of database status
+                    logger.info(f"Recording {egress_id} processing completed")
                     break
                 
                 elif egress.status == api.EgressStatus.EGRESS_FAILED:
                     logger.error(f"Recording {egress_id} failed")
                     
-                    # Update recording status
-                    async with async_session() as session:
-                        result = await session.execute(
-                            select(CallRecording).where(CallRecording.egress_id == egress_id)
-                        )
-                        recording = result.scalar_one_or_none()
-                        
-                        if recording:
-                            recording.status = "failed"
-                            recording.completed_at = datetime.now(timezone.utc)
-                            await session.commit()
+                    # Try to update recording status, but don't fail if database is down
+                    try:
+                        async with async_session() as session:
+                            result = await session.execute(
+                                select(CallRecording).where(CallRecording.egress_id == egress_id)
+                            )
+                            recording = result.scalar_one_or_none()
+                            
+                            if recording:
+                                recording.status = "failed"
+                                recording.completed_at = datetime.now(timezone.utc)
+                                await session.commit()
+                    except Exception as db_error:
+                        logger.warning(f"Failed to update failed recording status in database: {db_error}")
                     break
                     
         except Exception as e:

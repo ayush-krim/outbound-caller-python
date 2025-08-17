@@ -17,6 +17,7 @@ from livekit.agents import (
     AgentSession,
     Agent,
     JobContext,
+    JobRequest,
     function_tool,
     RunContext,
     get_job_context,
@@ -34,9 +35,11 @@ from livekit.plugins import (
 )
 from livekit.plugins.turn_detector.english import EnglishModel
 
-from database.recording_manager import RecordingManager
+# from database.recording_manager import RecordingManager  # Depends on removed tables
 from database.config import init_db, async_session
-from database.models import Call
+# from database.models import Call  # Table removed
+from database.interaction_service import InteractionService
+from call_disposition import DispositionTracker, CallDisposition
 
 
 # load environment variables, this is optional, only used for local development
@@ -65,7 +68,24 @@ class OutboundCaller(Agent):
         customer_name = account_info.get('customer_name', name)
         last_4_digits = account_info.get('last_4_digits', '0000')
         emi_amount = account_info.get('emi_amount', 1500)
-        days_past_due = account_info.get('days_past_due', 30)
+        
+        # Extract account details
+        late_fee = account_info.get('late_fee', 250)  # Default late fee
+        
+        # Calculate days past due from emi_due_date
+        emi_due_date_str = account_info.get('emi_due_date', '')
+        days_past_due = 30  # Default
+        if emi_due_date_str:
+            try:
+                emi_due_date = datetime.strptime(emi_due_date_str, '%Y-%m-%d')
+                days_diff = (datetime.now() - emi_due_date).days
+                if days_diff < 0:
+                    # Future date - not yet due
+                    days_past_due = 0
+                else:
+                    days_past_due = days_diff
+            except ValueError:
+                days_past_due = 30  # Default if date parsing fails
         
         # Initialize transcript tracking
         self.transcript_items = []
@@ -75,9 +95,23 @@ class OutboundCaller(Agent):
         self.audio_data = []  # Store actual audio data
         
         # Recording manager will be set by entrypoint
-        self.recording_manager = None
+        # self.recording_manager = None  # Disabled - tables removed
         self.call_id = None
         self.egress_id = None
+        
+        # Initialize disposition tracker
+        self.disposition_tracker = DispositionTracker()
+        self.disposition_tracker.call_start_time = datetime.now()
+        
+        # Extract interaction_id and other platform data
+        self.interaction_id = dial_info.get('interaction_id')
+        self.customer_id = dial_info.get('customer_id')
+        self.organization_id = dial_info.get('organization_id')
+        self.campaign_id = dial_info.get('campaign_id')
+        self.agent_id = dial_info.get('agent_id')
+        
+        # Initialize interaction service
+        self.interaction_service = InteractionService()
         
         super().__init__(
             instructions=f"""
@@ -90,72 +124,102 @@ class OutboundCaller(Agent):
             Overdue: ${emi_amount} ({days_past_due} days)
             Minimum payment: ${emi_amount * 0.5} (50% of monthly payment)
             
+            INITIAL GREETING (MUST BE SAID FIRST WHEN CALL CONNECTS):
+            "This is Sarah from Unicorn Bank. This call may be recorded. This is for debt collection. May I speak with {customer_name}?"
+            
+            Then continue with:
+            
             CONVERSATION STEPS:
-            1. "Good {time_of_day}, this is Sarah from XYZ Bank. Am I speaking with {customer_name}?"
-            2. "Your monthly payment of ${emi_amount} is past due. Can we resolve this today?"
-            3. Listen to their situation briefly
-            4. Offer ONE solution at a time:
+            1. After customer confirms identity: "I'm calling about your ${emi_amount} monthly payment that's {days_past_due} days past due. What's making payment difficult right now?"
+            2. Listen to their response about their situation
+            3. After their first response, include: "You can stop future calls by saying 'stop calling.'" naturally in your response
+            4. Respond with empathy and offer ONE solution at a time:
                - Full payment today
                - Partial payment now
                - Payment plan
             
             NEGOTIATION RULES:
-            - If customer asks for more than 2 days: "I understand you need time. How about we settle this within 2 days instead?"
-            - If customer says they can't pay full amount: "I hear you. Let's work together - can you manage ${emi_amount * 0.5} today?"
-            - Minimum acceptable payment is 50% (${emi_amount * 0.5}). If offered less: "I appreciate the effort, but we need at least ${emi_amount * 0.5} to help your account."
-            - If customer mentions hardship: "I'm sorry to hear that. Let me see how I can help. Can you manage even ${emi_amount * 0.5} to keep your account active?"
-            - If customer says they'll pay online: "Perfect! I'll share the payment link right now."
+            - FIRST RESPONSE (include opt-out): 
+              * If hardship: "I'm sorry to hear that. You can stop future calls by saying 'stop calling.' Is ${emi_amount * 0.5} - that's {emi_amount * 0.5:.0f} dollars - possible today?"
+              * If asks for time: "I understand. You can stop future calls by saying 'stop calling.' How about we settle this within 2 days instead?"
+              * If can't pay full: "I hear you. You can stop future calls by saying 'stop calling.' Can you manage ${emi_amount * 0.5} - that's {emi_amount * 0.5:.0f} dollars - today?"
+            - SUBSEQUENT RESPONSES (no opt-out mention):
+              * If customer asks for more than 2 days: "I understand you need time. How about we settle this within 2 days instead?"
+              * Minimum acceptable payment is 50% (${emi_amount * 0.5}). If offered less: "I appreciate the effort, but we need at least ${emi_amount * 0.5} - that's {emi_amount * 0.5:.0f} dollars - to help your account."
+              * If customer says they'll pay online: "Perfect! I'll share the payment link right now."
             
             RESPONSES MUST BE:
             - Under 2 sentences
+            - ALWAYS BE EMPATHETIC - Show genuine understanding and care
             - Empathetic but persuasive
             - Focus on immediate action
             
+            EMPATHY GUIDELINES:
+            - Always acknowledge their feelings first before offering solutions
+            - Use phrases like "I understand", "I hear you", "That must be difficult"
+            - Never sound robotic or dismissive
+            - Match their emotional tone with appropriate compassion
+            
             If asked about account details, use check_account_balance tool.
             If they agree to pay, use process_payment tool.
+            If they say "stop", "stop calling" or request to stop future calls, use opt_out_future_calls tool immediately.
             Only use transfer_call tool AFTER trying to help with hardship cases first.
+            
+            ACCOUNT INFO RESPONSES:
+            - When customer asks for account info, give DIRECT ANSWERS immediately
+            - If there's any delay while checking, say: "I'm looking into your records"
+            - Keep responses SHORT - just state the facts
+            - IMPORTANT: Only provide the specific information requested, NOT all account details
+            - When using check_account_balance tool, extract ONLY the relevant info from the response
+            - Examples:
+              "What's my balance?" → "Your total balance is $X"
+              "What's the interest rate?" → "Your rate is X%"
+              "What's the late fee?" → "The late fee is $X"
+              "When was this due?" → "It was due on [date]"
             
             NEVER lecture. NEVER threaten. Keep it conversational.
             
-            CRITICAL COMPLIANCE SCRIPT - When Customer Asks: "What happens if I don't pay anything?"
+            CONSEQUENCES RESPONSE - When Customer Asks: "What happens if I don't pay?"
             
-            Step 1: Acknowledge & Set Professional Tone
-            "I understand you want to know about the potential consequences. I'll be completely transparent with you about what could happen if this debt remains unpaid."
+            STAGE 1 - BRIEF INITIAL RESPONSE (Use this FIRST):
+            "I understand you want to know about potential consequences. Let me start with the immediate impacts:
+            - Late fees of ${late_fee} have already been applied to your account
+            - Additional penalty fees may continue to accrue
+            - Interest continues to accumulate on the unpaid balance
             
-            Step 2: Credit Reporting (Always Safe to Mention)
-            "Credit Impact:
+            Would you like me to explain the longer-term consequences as well?"
+            
+            STAGE 2 - DETAILED RESPONSE (Only if customer wants more details):
+            If customer says yes or wants more information, then provide:
+            
+            "I'll be completely transparent about what could happen if this debt remains unpaid.
+            
+            Credit Impact:
             - This debt may be reported to the major credit bureaus if we haven't already done so
             - A collection account could remain on your credit report for up to seven years
-            - This could affect your ability to obtain future credit, loans, housing, or employment"
+            - This could affect your ability to obtain future credit, loans, housing, or employment
             
-            Step 3: Financial Consequences (If Applicable by Contract/Law)
-            "Continued Costs:
-            - Interest, fees, and costs may continue to accrue as permitted by your original agreement and applicable law
-            - The total amount owed may increase over time"
-            
-            Step 4: Legal Action (CRITICAL - Use EXACT Language)
-            "Potential Legal Action:
+            Legal Possibilities:
             - If this debt is within the statute of limitations for your state AND our company decides to pursue legal action, a lawsuit could potentially be filed
             - Important: I cannot guarantee whether, when, or if legal action might occur - this depends on many factors including company policy
             - IF a lawsuit were filed AND a judgment obtained, this could potentially lead to wage garnishment or bank account garnishment, depending on your state's laws and exemptions
-            - Any legal action would result in additional court costs and attorney fees being added to the debt"
+            - Any legal action would result in additional court costs and attorney fees being added to the debt
             
-            Step 5: Redirect to Resolution
-            "The Good News:
+            The Good News:
             - These are potential consequences - not guaranteed outcomes
             - The best way to avoid ALL of these consequences is to work with us on a payment solution
             - We have various options available and genuinely want to help you resolve this
             
             That's exactly why I'm calling today. Based on your situation, what would be manageable for you to get started on resolving this?"
             
-            IMPORTANT: Use this EXACT language. Do NOT deviate or summarize. This is for legal compliance.
+            IMPORTANT: Always start with STAGE 1. Only proceed to STAGE 2 if customer requests more information.
             
             COMPLIANCE SCRIPT - When Customer Asks About Penalties/Late Fees:
             
-            Step 1: Acknowledge the Question
-            "I understand you're asking about penalties and late fees on your account. Let me provide you with that information."
+            Step 1: Quick Direct Response (Use check_account_balance tool but ONLY mention late fee)
+            "The late fee on your account is $[late_fee_amount]."
             
-            Step 2: Current Balance Breakdown (Use check_account_balance tool first)
+            Step 2: ONLY if customer asks for more details, provide breakdown:
             "According to our records:
             - Your original balance was: $[original_amount]
             - Current late fee applied: $[late_fee_amount]
@@ -257,11 +321,30 @@ class OutboundCaller(Agent):
         await self.hangup()
 
     @function_tool()
+    async def opt_out_future_calls(self, ctx: RunContext):
+        """Called when the user says 'stop', 'stop calling' or requests to stop future calls"""
+        logger.info(f"User requested to opt out of future calls: {self.participant.identity}")
+        
+        # Acknowledge the opt-out request
+        await ctx.session.generate_reply(
+            instructions="Acknowledge that you've noted their request to stop future calls and confirm it will be processed."
+        )
+        
+        # TODO: Here you would typically update the database to mark this customer as opted-out
+        # For now, we'll just log it and end the call
+        
+        # Mark disposition as opted out
+        self.disposition_tracker.update_disposition(CallDisposition.DO_NOT_CALL)
+        
+        # End the call after acknowledgment
+        await self.end_call(ctx)
+
+    @function_tool()
     async def check_account_balance(
         self,
         ctx: RunContext,
     ):
-        """Called when customer asks about their account details, balance, or payment history"""
+        """Called when customer asks about their account details, balance, payment history, interest rate, APR, or any account-related information"""
         account_info = self.dial_info.get('account_info', {})
         logger.info(f"checking account balance for {self.participant.identity}")
         
@@ -376,6 +459,9 @@ class OutboundCaller(Agent):
 
 
 async def entrypoint(ctx: JobContext):
+    # Load environment variables for job subprocess
+    load_dotenv(dotenv_path=".env.local")
+    
     start_time = time.time()
     logger.info(f"[TIMING] Starting entrypoint for room {ctx.room.name}")
     
@@ -387,7 +473,7 @@ async def entrypoint(ctx: JobContext):
     )
     
     # Initialize database
-    database_enabled = False  # Temporarily disable database
+    database_enabled = True  # Enable database for interaction tracking
     if database_enabled:
         try:
             await init_db()
@@ -420,24 +506,9 @@ async def entrypoint(ctx: JobContext):
     else:
         participant_identity = phone_number = dial_info["phone_number"]
 
-    # Create call record in database
-    if database_enabled:
-        try:
-            async with async_session() as session:
-                call_record = Call(
-                    id=call_id,
-                    dispatch_id=dispatch_id,
-                    phone_number=phone_number,
-                    room_name=ctx.room.name,
-                    status="initiated",
-                    call_metadata=dial_info
-                )
-                session.add(call_record)
-                await session.commit()
-                logger.info(f"Created call record: {call_id}")
-        except Exception as e:
-            logger.error(f"Failed to create call record: {e}")
-            # Continue without database record
+    # Call record creation removed - using interactions table instead
+    # if database_enabled:
+    #     # Call table has been removed
     
     # look up the user's phone number and appointment details
     agent_create_start = time.time()
@@ -450,10 +521,10 @@ async def entrypoint(ctx: JobContext):
     agent_create_time = time.time() - agent_create_start
     logger.info(f"[TIMING] Agent creation: {agent_create_time:.3f}s")
     
-    # Initialize recording manager
-    recording_manager = RecordingManager(livekit_api)
-    await recording_manager.initialize()
-    agent.recording_manager = recording_manager
+    # Initialize recording manager - DISABLED (tables removed)
+    # recording_manager = RecordingManager(livekit_api)
+    # await recording_manager.initialize()
+    # agent.recording_manager = recording_manager
 
     # ULTRA-FAST: Use OpenAI Realtime API (speech-to-speech)
     session_create_start = time.time()
@@ -478,6 +549,9 @@ async def entrypoint(ctx: JobContext):
             "speaker": "user",
             "text": text
         })
+        # Track for disposition
+        agent.disposition_tracker.add_transcript_item("customer", text)
+        agent.disposition_tracker.update_disposition()
     
     @session.on("conversation_item_added")
     def on_conversation_item(event):
@@ -491,6 +565,12 @@ async def entrypoint(ctx: JobContext):
                 "speaker": role,
                 "text": text
             })
+            # Track for disposition based on speaker
+            if role.lower() in ['user', 'customer']:
+                agent.disposition_tracker.add_transcript_item("customer", text)
+                agent.disposition_tracker.update_disposition()
+            elif role.lower() in ['assistant', 'agent']:
+                agent.disposition_tracker.add_transcript_item("agent", text)
     
     @session.on("close")
     def on_session_close(event):
@@ -516,6 +596,36 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.error(f"Error accessing session history: {e}")
             
+        # Get final disposition
+        final_disposition = agent.disposition_tracker.get_final_disposition()
+        logger.info(f"Final call disposition: {final_disposition['disposition']}")
+        
+        # Update interaction with final disposition and data
+        if agent.interaction_id:
+            try:
+                # Calculate duration
+                duration = int(time.time() - start_time)
+                
+                # Get recording URL if available
+                recording_url = None
+                if agent.egress_id and False:  # recording_manager disabled
+                    # Recording URL would be available from recording manager
+                    # This is a placeholder - actual implementation depends on recording manager
+                    pass
+                
+                async with async_session() as session:
+                    await agent.interaction_service.update_call_completed(
+                        session,
+                        interaction_id=agent.interaction_id,
+                        disposition_data=final_disposition,
+                        transcript=agent.transcript_items,
+                        duration=duration,
+                        recording_url=recording_url
+                    )
+                    logger.info(f"Updated interaction {agent.interaction_id} - call completed")
+            except Exception as e:
+                logger.error(f"Failed to update interaction on completion: {e}")
+        
         # Save transcript to file
         try:
             transcript_filename = f"transcript_{ctx.room.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
@@ -524,6 +634,7 @@ async def entrypoint(ctx: JobContext):
                     "room_name": ctx.room.name,
                     "phone_number": phone_number,
                     "transcript": agent.transcript_items,
+                    "disposition": final_disposition,
                     "audio_frames_captured": len(agent.audio_frames),
                     "audio_frame_samples": agent.audio_frames[:10] if agent.audio_frames else [],  # Save first 10 frames as sample
                     "call_start": start_time,
@@ -558,7 +669,7 @@ async def entrypoint(ctx: JobContext):
         # Stop recording if it was started
         if agent.egress_id:
             try:
-                await agent.recording_manager.stop_recording(agent.egress_id)
+                # await agent.recording_manager.stop_recording(agent.egress_id)  # Disabled
                 logger.info(f"Stopped recording: {agent.egress_id}")
             except Exception as e:
                 logger.error(f"Failed to stop recording: {e}")
@@ -593,6 +704,20 @@ async def entrypoint(ctx: JobContext):
         )
     )
 
+    # Update interaction when call starts
+    if agent.interaction_id:
+        try:
+            async with async_session() as session:
+                await agent.interaction_service.update_call_started(
+                    session,
+                    interaction_id=agent.interaction_id,
+                    room_name=ctx.room.name,
+                    phone_number=phone_number
+                )
+                logger.info(f"Updated interaction {agent.interaction_id} - call started")
+        except Exception as e:
+            logger.error(f"Failed to update interaction on call start: {e}")
+    
     # `create_sip_participant` starts dialing the user
     try:
         sip_dial_start = time.time()
@@ -617,6 +742,21 @@ async def entrypoint(ctx: JobContext):
 
         agent.set_participant(participant)
         
+        # Mark call as connected for disposition
+        agent.disposition_tracker.set_connection_status(connected=True)
+        
+        # Update interaction when call connects
+        if agent.interaction_id:
+            try:
+                async with async_session() as session:
+                    await agent.interaction_service.update_call_connected(
+                        session,
+                        interaction_id=agent.interaction_id
+                    )
+                    logger.info(f"Updated interaction {agent.interaction_id} - call connected")
+            except Exception as e:
+                logger.error(f"Failed to update interaction on connect: {e}")
+        
         # Update call status to connected
         if database_enabled:
             try:
@@ -633,10 +773,10 @@ async def entrypoint(ctx: JobContext):
         
         # Start recording
         try:
-            egress_id = await recording_manager.start_room_recording(
-                room_name=ctx.room.name,
-                call_id=call_id
-            )
+            # egress_id = await recording_manager.start_room_recording(
+            #     room_name=ctx.room.name,
+            #     call_id=call_id)  # Disabled - tables removed
+            egress_id = None
             if egress_id:
                 agent.egress_id = egress_id
                 logger.info(f"Started recording with egress_id: {egress_id}")
@@ -658,13 +798,58 @@ async def entrypoint(ctx: JobContext):
             f"SIP status: {e.metadata.get('sip_status_code')} "
             f"{e.metadata.get('sip_status')}"
         )
+        
+        # Handle disposition for failed calls
+        agent.disposition_tracker.set_connection_status(connected=False)
+        sip_status = e.metadata.get('sip_status', '')
+        
+        # Determine disposition based on SIP status
+        if "busy" in sip_status.lower():
+            agent.disposition_tracker.update_disposition(CallDisposition.BUSY)
+        elif "no answer" in sip_status.lower() or "timeout" in sip_status.lower():
+            agent.disposition_tracker.update_disposition(CallDisposition.NO_ANSWER)
+        else:
+            agent.disposition_tracker.update_disposition(CallDisposition.FAILED)
+        
+        # Log final disposition
+        final_disposition = agent.disposition_tracker.get_final_disposition()
+        logger.info(f"Call disposition: {final_disposition['disposition']}")
+        
+        # Update interaction for failed call
+        if agent.interaction_id:
+            try:
+                async with async_session() as session:
+                    await agent.interaction_service.update_call_failed(
+                        session,
+                        interaction_id=agent.interaction_id,
+                        reason=final_disposition['disposition'] or "Failed",
+                        sip_status=sip_status
+                    )
+                    logger.info(f"Updated interaction {agent.interaction_id} - call failed")
+            except Exception as e:
+                logger.error(f"Failed to update interaction on failure: {e}")
+        
         ctx.shutdown()
 
 
+async def job_request(job_req: JobRequest):
+    """Handle incoming job requests"""
+    logger.info(f"[JOB_REQUEST] Received job request for room: {job_req.room.name}")
+    logger.info(f"[JOB_REQUEST] Agent name: {job_req.agent_name}")
+    logger.info(f"[JOB_REQUEST] Job metadata: {job_req.metadata}")
+    # Accept all job requests for our agent
+    return True
+
 if __name__ == "__main__":
+    # Add logging to see what's happening
+    logger.info("Starting agent worker...")
+    logger.info(f"LiveKit URL: {os.getenv('LIVEKIT_URL')}")
+    logger.info(f"Agent name: outbound-caller-local")
+    
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
             agent_name="outbound-caller-local",
+            request_fnc=job_request,
         )
     )
