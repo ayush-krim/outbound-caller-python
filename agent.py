@@ -831,14 +831,14 @@ async def entrypoint(ctx: JobContext):
         
         ctx.shutdown()
 
-
-async def job_request(job_req: JobRequest):
-    """Handle incoming job requests"""
-    logger.info(f"[JOB_REQUEST] Received job request for room: {job_req.room.name}")
-    logger.info(f"[JOB_REQUEST] Agent name: {job_req.agent_name}")
-    logger.info(f"[JOB_REQUEST] Job metadata: {job_req.metadata}")
-    # Accept all job requests for our agent
-    return True
+async def job_request(job_req: JobRequest) -> None:
+      """Handle incoming job requests"""
+      logger.info(f"[JOB_REQUEST] Received job request for room: {job_req.room.name}")
+      logger.info(f"[JOB_REQUEST] Agent name: {job_req.agent_name}")
+      if hasattr(job_req, 'job') and job_req.job and hasattr(job_req.job, 'metadata'):
+          logger.info(f"[JOB_REQUEST] Job metadata: {job_req.job.metadata}")
+      # Accept all job requests for our agent
+      await job_req.accept()
 
 if __name__ == "__main__":
     # Add logging to see what's happening

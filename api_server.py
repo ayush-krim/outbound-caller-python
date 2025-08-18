@@ -25,7 +25,7 @@ load_dotenv(dotenv_path=".env.local")
 
 # Configuration
 DEFAULT_PORT = 8000
-DEFAULT_HOST = "127.0.0.1"
+DEFAULT_HOST = "0.0.0.0"
 API_PORT = int(os.getenv("API_PORT", DEFAULT_PORT))
 API_HOST = os.getenv("API_HOST", DEFAULT_HOST)
 

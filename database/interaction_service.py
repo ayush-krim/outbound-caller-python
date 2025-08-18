@@ -90,7 +90,7 @@ class InteractionService:
             
             if row:
                 return {
-                    "id": row.id,
+                    "id": str(row.id),
                     "status": row.status,
                     "channel": row.channel,
                     "customerId": row.customerId,
@@ -185,7 +185,7 @@ class InteractionService:
             SET 
                 status = 'IN_PROGRESS',
                 "startTime" = NOW(),
-                "callDisposition" = :call_disposition::jsonb,
+                "callDisposition" = CAST(:call_disposition AS jsonb),
                 "updatedAt" = NOW()
             WHERE id = :interaction_id
             """
@@ -321,10 +321,10 @@ DISPOSITION_TIME: {datetime.utcnow().isoformat()}"""
                 outcome = :outcome,
                 "endTime" = NOW(),
                 duration = :duration,
-                transcript = :transcript::jsonb,
+                transcript = CAST(:transcript AS jsonb),
                 recording = :recording,
                 notes = :notes,
-                "callDisposition" = :call_disposition::jsonb,
+                "callDisposition" = CAST(:call_disposition AS jsonb),
                 "paymentDiscussed" = :payment_discussed,
                 "disputeRaised" = :dispute_raised,
                 "followUpRequired" = :follow_up_required,
@@ -402,7 +402,7 @@ FAILED_AT: {datetime.utcnow().isoformat()}"""
                 "endTime" = NOW(),
                 duration = 0,
                 notes = :notes,
-                "callDisposition" = :call_disposition::jsonb,
+                "callDisposition" = CAST(:call_disposition AS jsonb),
                 "updatedAt" = NOW()
             WHERE id = :interaction_id
             """
