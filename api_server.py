@@ -9,6 +9,7 @@ import socket
 import asyncio
 import uuid
 import time
+import logging
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 from contextlib import asynccontextmanager
@@ -19,6 +20,9 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from livekit import api
 import uvicorn
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv(dotenv_path=".env.local")
@@ -252,10 +256,16 @@ async def make_call(request: CallRequest, background_tasks: BackgroundTasks):
             )
             
             if not interaction:
-                raise HTTPException(
-                    status_code=400,
-                    detail="No pending interaction found for customer. Ensure interaction exists with NOT_STARTED status."
+                # Auto-create interaction if none exists
+                logger.info(f"No pending interaction found for customer {request.customer_id}, creating new one")
+                interaction = await interaction_service.create_interaction(
+                    session,
+                    customer_id=request.customer_id,
+                    organization_id=request.organization_id,
+                    agent_id=request.agent_id,
+                    campaign_id=request.campaign_id
                 )
+                logger.info(f"Created new interaction {interaction['id']} for customer {request.customer_id}")
             
             interaction_id = interaction["id"]
             

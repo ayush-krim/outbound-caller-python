@@ -104,6 +104,90 @@ class InteractionService:
             logger.error(f"Error validating interaction: {e}")
             raise
     
+    async def create_interaction(
+        self,
+        session: AsyncSession,
+        customer_id: str,
+        organization_id: str,
+        agent_id: str,
+        campaign_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Create a new interaction record with NOT_STARTED status
+        
+        Args:
+            session: Database session
+            customer_id: Customer ID
+            organization_id: Organization ID
+            agent_id: Agent ID
+            campaign_id: Optional campaign ID
+            
+        Returns:
+            Created interaction record dict
+        """
+        try:
+            # Build insert query
+            columns = [
+                '"customerId"',
+                '"organizationId"',
+                '"agentId"',
+                'status',
+                'channel',
+                'direction',
+                '"createdAt"',
+                '"updatedAt"'
+            ]
+            values = [
+                ':customer_id',
+                ':organization_id',
+                ':agent_id',
+                "'NOT_STARTED'",
+                "'VOICE'",
+                "'OUTBOUND'",
+                'NOW()',
+                'NOW()'
+            ]
+            
+            params = {
+                "customer_id": customer_id,
+                "organization_id": organization_id,
+                "agent_id": agent_id
+            }
+            
+            if campaign_id:
+                columns.append('"campaignId"')
+                values.append(':campaign_id')
+                params["campaign_id"] = campaign_id
+            
+            query = f"""
+            INSERT INTO interactions ({', '.join(columns)})
+            VALUES ({', '.join(values)})
+            RETURNING id, status, channel, "customerId", "organizationId", "campaignId", "agentId"
+            """
+            
+            result = await session.execute(text(query), params)
+            row = result.fetchone()
+            await session.commit()
+            
+            if row:
+                logger.info(f"Created new interaction {row.id} for customer {customer_id}")
+                return {
+                    "id": str(row.id),
+                    "status": row.status,
+                    "channel": row.channel,
+                    "customerId": row.customerId,
+                    "organizationId": row.organizationId,
+                    "campaignId": row.campaignId,
+                    "agentId": row.agentId
+                }
+            
+            raise Exception("Failed to create interaction - no row returned")
+            
+        except Exception as e:
+            logger.error(f"Error creating interaction: {e}")
+            await session.rollback()
+            raise
+    
     async def update_interaction_status(
         self, 
         session: AsyncSession,
