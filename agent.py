@@ -161,9 +161,22 @@ class OutboundCaller(Agent):
             - Match their emotional tone with appropriate compassion
             
             If asked about account details, use check_account_balance tool.
-            If they agree to pay, use process_payment tool.
+            If they agree to pay, use process_payment tool (call will end automatically).
+            If they need time to pay, use schedule_followup tool (call will end automatically).
             If they say "stop", "stop calling" or request to stop future calls, use opt_out_future_calls tool immediately.
             Only use transfer_call tool AFTER trying to help with hardship cases first.
+            
+            COMPLIANCE TERMINATION TRIGGERS - Use these tools immediately when detected:
+            - Wrong party/number ("This isn't [name]", "Wrong number") → use terminate_wrong_party
+            - "I have an attorney" or "My lawyer" → use terminate_attorney_represented
+            - "Don't call me at work" → use opt_out_future_calls and note workplace restriction
+            - Bankruptcy mentioned → use terminate_bankruptcy
+            - Death/medical emergency/hospitalization → use terminate_medical_emergency
+            - Serious emotional distress → use terminate_medical_emergency
+            - Customer under 18 → say you cannot discuss and use end_call
+            - Abusive language → remain calm and use end_call
+            - Cannot understand after multiple attempts → use terminate_communication_failure
+            - Customer wants to reschedule → use schedule_callback with their preferred time
             
             ACCOUNT INFO RESPONSES:
             - When customer asks for account info, give DIRECT ANSWERS immediately
@@ -371,8 +384,22 @@ class OutboundCaller(Agent):
         logger.info(
             f"processing {payment_type} payment of ${amount} for {self.participant.identity}"
         )
+        
+        # Update disposition based on payment
+        self.disposition_tracker.update_disposition(CallDisposition.AGREE_TO_PAY)
+        
         # In production, this would integrate with payment gateway
-        return f"Payment of ${amount} processed successfully. Confirmation number: PAY{int(time.time())}"
+        confirmation = f"Payment of ${amount} processed successfully. Confirmation number: PAY{int(time.time())}"
+        
+        # Generate final response and end call
+        await ctx.session.generate_reply(
+            instructions=f"Thank them for the payment. Say: 'Great! {confirmation} Thank you for taking care of this today. Have a wonderful day!' Then end the call."
+        )
+        
+        # End the call after payment confirmation
+        await self.end_call(ctx)
+        
+        return confirmation
 
     @function_tool()
     async def schedule_followup(
@@ -390,13 +417,90 @@ class OutboundCaller(Agent):
         logger.info(
             f"scheduling followup with {self.participant.identity} on {date} for ${amount}"
         )
-        return f"Followup scheduled for {date}. We'll call about your ${amount} payment."
+        
+        # Update disposition for promise to pay
+        self.disposition_tracker.update_disposition(CallDisposition.ACCEPTABLE_PROMISE_TO_PAY)
+        
+        confirmation = f"Followup scheduled for {date}. We'll call about your ${amount} payment."
+        
+        # Generate final response and end call
+        await ctx.session.generate_reply(
+            instructions=f"Confirm the arrangement. Say: 'Perfect! I have you scheduled for {date} to make the ${amount} payment. We'll speak with you then. Thank you and have a great day!' Then end the call."
+        )
+        
+        # End the call after scheduling
+        await self.end_call(ctx)
+        
+        return confirmation
 
     @function_tool()
     async def detected_answering_machine(self, ctx: RunContext):
         """Called when the call reaches voicemail. Use this tool AFTER you hear the voicemail greeting"""
         logger.info(f"detected answering machine for {self.participant.identity}")
         await self.hangup()
+
+    @function_tool()
+    async def terminate_wrong_party(self, ctx: RunContext):
+        """Terminate when wrong party or wrong number"""
+        logger.info(f"Terminating call - wrong party for {self.participant.identity}")
+        self.disposition_tracker.update_disposition(CallDisposition.WRONG_PARTY)
+        await ctx.session.generate_reply(
+            instructions="Apologize for the wrong number. Say 'I apologize for the confusion. Have a good day.' Then end the call."
+        )
+        await self.end_call(ctx)
+
+    @function_tool()
+    async def terminate_attorney_represented(self, ctx: RunContext):
+        """Terminate when customer has attorney representation"""
+        logger.info(f"Terminating call - attorney represented: {self.participant.identity}")
+        self.disposition_tracker.update_disposition(CallDisposition.ATTORNEY_REPRESENTED)
+        await ctx.session.generate_reply(
+            instructions="Acknowledge attorney representation. Say 'I understand you have legal representation. We'll only communicate through your attorney going forward. Thank you.' Then end the call."
+        )
+        await self.end_call(ctx)
+
+    @function_tool()
+    async def terminate_medical_emergency(self, ctx: RunContext):
+        """Terminate for medical emergency, death in family, or emotional distress"""
+        logger.info(f"Terminating call - medical/emotional emergency: {self.participant.identity}")
+        self.disposition_tracker.update_disposition(CallDisposition.MEDICAL_EMERGENCY)
+        await ctx.session.generate_reply(
+            instructions="Express sincere empathy. Say 'I'm so sorry to hear that. Please take care of yourself and your family. We'll give you some time.' Then end the call."
+        )
+        await self.end_call(ctx)
+
+    @function_tool()
+    async def terminate_bankruptcy(self, ctx: RunContext):
+        """Terminate when customer mentions bankruptcy"""
+        logger.info(f"Terminating call - bankruptcy mentioned: {self.participant.identity}")
+        self.disposition_tracker.update_disposition(CallDisposition.BANKRUPTCY)
+        await ctx.session.generate_reply(
+            instructions="Acknowledge bankruptcy. Say 'I understand you've filed for bankruptcy. We'll update our records accordingly. Thank you for letting us know.' Then end the call."
+        )
+        await self.end_call(ctx)
+
+    @function_tool()
+    async def terminate_communication_failure(self, ctx: RunContext):
+        """Terminate after 3 failed communication attempts"""
+        logger.info(f"Terminating call - communication failure: {self.participant.identity}")
+        self.disposition_tracker.update_disposition(CallDisposition.COMMUNICATION_FAILURE)
+        await ctx.session.generate_reply(
+            instructions="Acknowledge communication issues. Say 'I'm having trouble with our connection. We'll try calling another time. Goodbye.' Then end the call."
+        )
+        await self.end_call(ctx)
+
+    @function_tool()
+    async def schedule_callback(self, ctx: RunContext, callback_time: str):
+        """Schedule a callback and terminate the call"""
+        logger.info(f"Scheduling callback for {self.participant.identity} at {callback_time}")
+        self.disposition_tracker.update_disposition(CallDisposition.CALLBACK_SCHEDULED)
+        # Store callback time in disposition data
+        if hasattr(self.disposition_tracker, 'disposition_data'):
+            self.disposition_tracker.disposition_data = {"callback_time": callback_time}
+        await ctx.session.generate_reply(
+            instructions=f"Confirm the callback. Say 'Perfect! I have you scheduled for a callback {callback_time}. We'll speak with you then. Have a great day!' Then end the call."
+        )
+        await self.end_call(ctx)
 
     async def _timeout_handler(self):
         """Automatically hang up the call after 180 seconds"""

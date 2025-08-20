@@ -41,6 +41,17 @@ class CallDisposition(Enum):
     UNACCEPTABLE_PROMISE_TO_PAY = "Unacceptable Promise To Pay"
     DO_NOT_CALL = "Do Not Call - Opted Out"
     
+    # Compliance terminations
+    WRONG_PARTY = "Wrong Party"
+    ATTORNEY_REPRESENTED = "Attorney Represented"
+    MEDICAL_EMERGENCY = "Medical Emergency"
+    BANKRUPTCY = "Bankruptcy"
+    COMMUNICATION_FAILURE = "Communication Failure"
+    CALLBACK_SCHEDULED = "Callback Scheduled"
+    WORKPLACE_RESTRICTION = "Workplace Restriction"
+    MINOR_CONTACT = "Minor Contact"
+    DECEASED = "Deceased"
+    
     # NOT_CONNECTED dispositions
     BUSY = "Busy"
     FAILED = "Failed"
@@ -68,6 +79,17 @@ DISPOSITION_CONNECTION_MAP = {
     CallDisposition.ACCEPTABLE_PROMISE_TO_PAY: ConnectionStatus.CONNECTED,
     CallDisposition.UNACCEPTABLE_PROMISE_TO_PAY: ConnectionStatus.CONNECTED,
     CallDisposition.DO_NOT_CALL: ConnectionStatus.CONNECTED,
+    
+    # Compliance terminations (all require connection to determine)
+    CallDisposition.WRONG_PARTY: ConnectionStatus.CONNECTED,
+    CallDisposition.ATTORNEY_REPRESENTED: ConnectionStatus.CONNECTED,
+    CallDisposition.MEDICAL_EMERGENCY: ConnectionStatus.CONNECTED,
+    CallDisposition.BANKRUPTCY: ConnectionStatus.CONNECTED,
+    CallDisposition.COMMUNICATION_FAILURE: ConnectionStatus.CONNECTED,
+    CallDisposition.CALLBACK_SCHEDULED: ConnectionStatus.CONNECTED,
+    CallDisposition.WORKPLACE_RESTRICTION: ConnectionStatus.CONNECTED,
+    CallDisposition.MINOR_CONTACT: ConnectionStatus.CONNECTED,
+    CallDisposition.DECEASED: ConnectionStatus.CONNECTED,
     
     # NOT_CONNECTED dispositions
     CallDisposition.BUSY: ConnectionStatus.NOT_CONNECTED,
