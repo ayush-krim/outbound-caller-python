@@ -63,7 +63,7 @@ class CallRequest(BaseModel):
     customer_id: str = Field(..., description="Customer ID from platform")
     organization_id: str = Field(..., description="Organization ID")
     campaign_id: Optional[str] = Field(None, description="Campaign ID if applicable")
-    agent_id: str = Field(..., description="Agent ID")
+    agent_id: str = Field(..., description="Agent ID (required - must be a valid agent like 'POST_BOUNCE_AGENT' or 'PREDUE_AGENT')")
     phone_number: str = Field(..., description="Phone number to call (E.164 format)")
     customer_info: Optional[CustomerInfo] = None
     transfer_to: Optional[str] = Field(default="+1 507 626 9649", description="Transfer number")
@@ -214,6 +214,10 @@ async def make_call(request: CallRequest, background_tasks: BackgroundTasks):
     """
     Trigger an outbound call
     
+    Available Agents:
+    - "POST_BOUNCE_AGENT" - Sarah, post-bounce collection agent (50% minimum, 2-day timeline)
+    - "PREDUE_AGENT" - Michael, pre-due reminder agent (friendly reminders)
+    
     Example:
     ```bash
     curl -X POST http://localhost:8000/call \\
@@ -222,7 +226,7 @@ async def make_call(request: CallRequest, background_tasks: BackgroundTasks):
         "customer_id": "cust_123",
         "organization_id": "org_456",
         "campaign_id": "camp_789",
-        "agent_id": "agent_001",
+        "agent_id": "AGENT_001",
         "phone_number": "+1234567890",
         "from_number": "+15076269649",
         "customer_info": {
@@ -234,6 +238,20 @@ async def make_call(request: CallRequest, background_tasks: BackgroundTasks):
       }'
     ```
     """
+    
+    # Import instruction service to validate agent_id
+    from services.agent_instructions import AgentInstructions
+    instruction_service = AgentInstructions()
+    available_agents = instruction_service.list_available_agents()
+    
+    # Validate agent_id exists
+    if request.agent_id not in available_agents:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid agent_id '{request.agent_id}'. Available agents: {', '.join(available_agents)}"
+        )
+    
+    logger.info(f"Using agent: {request.agent_id}")
     
     # Validate LiveKit configuration
     if not all([LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET]):
@@ -279,7 +297,7 @@ async def make_call(request: CallRequest, background_tasks: BackgroundTasks):
                 customer_id=request.customer_id,
                 organization_id=request.organization_id,
                 campaign_id=request.campaign_id,
-                agent_id=request.agent_id
+                agent_id=request.agent_id  # Always pass the validated agent_id
             )
         
         return CallResponse(

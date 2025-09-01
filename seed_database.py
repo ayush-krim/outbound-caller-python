@@ -93,36 +93,59 @@ class DatabaseSeeder:
         """Create user (agent) if it doesn't exist"""
         self.user_id = "test_agent_001"
         
-        async with async_session() as session:
-            # Check if exists
-            result = await session.execute(
-                text("SELECT id FROM users WHERE id = :id"),
-                {"id": self.user_id}
-            )
-            if result.fetchone():
-                logger.info(f"User {self.user_id} already exists")
-                return
-            
-            # Create user with camelCase columns
-            await session.execute(text("""
-                INSERT INTO users (
-                    id, email, password, "firstName", "lastName",
-                    status, "organizationId", "createdAt", "updatedAt"
-                ) VALUES (
-                    :id, :email, :password, :first_name, :last_name,
-                    :status, :org_id, NOW(), NOW()
-                )
-            """), {
-                "id": self.user_id,
+        # Create multiple agents for the multi-agent system
+        agents = [
+            {
+                "id": "test_agent_001",
                 "email": "test.agent@testorg.com",
-                "password": "$2b$10$YourHashedPasswordHere",  # In real app, this would be properly hashed
                 "first_name": "Test",
-                "last_name": "Agent",
-                "status": "ACTIVE",
-                "org_id": self.organization_id
-            })
-            await session.commit()
-            logger.info(f"✅ Created user (agent): {self.user_id}")
+                "last_name": "Agent"
+            },
+            {
+                "id": "POST_BOUNCE_AGENT",
+                "email": "sarah.agent@testorg.com",
+                "first_name": "Sarah",
+                "last_name": "Agent"
+            },
+            {
+                "id": "PREDUE_AGENT",
+                "email": "michael.agent@testorg.com",
+                "first_name": "Michael",
+                "last_name": "Agent"
+            }
+        ]
+        
+        async with async_session() as session:
+            for agent in agents:
+                # Check if exists
+                result = await session.execute(
+                    text("SELECT id FROM users WHERE id = :id"),
+                    {"id": agent["id"]}
+                )
+                if result.fetchone():
+                    logger.info(f"User {agent['id']} already exists")
+                    continue
+                
+                # Create user with camelCase columns
+                await session.execute(text("""
+                    INSERT INTO users (
+                        id, email, password, "firstName", "lastName",
+                        status, "organizationId", "createdAt", "updatedAt"
+                    ) VALUES (
+                        :id, :email, :password, :first_name, :last_name,
+                        :status, :org_id, NOW(), NOW()
+                    )
+                """), {
+                    "id": agent["id"],
+                    "email": agent["email"],
+                    "password": "$2b$10$YourHashedPasswordHere",  # In real app, this would be properly hashed
+                    "first_name": agent["first_name"],
+                    "last_name": agent["last_name"],
+                    "status": "ACTIVE",
+                    "org_id": self.organization_id
+                })
+                await session.commit()
+                logger.info(f"✅ Created user (agent): {agent['id']}")
     
     async def create_customer(self):
         """Create customer if it doesn't exist"""
@@ -239,41 +262,61 @@ class DatabaseSeeder:
             logger.info(f"✅ Created campaign: {self.campaign_id}")
     
     async def create_agent_config(self):
-        """Create agent config (optional but good to have)"""
-        self.agent_config_id = "test_agent_config_001"
+        """Create agent configs for multi-agent system"""
+        # Create multiple agent configs for different agents
+        agent_configs = [
+            {
+                "id": "test_agent_config_001",
+                "name": "Test Voice Agent Config",
+                "personality": "professional"
+            },
+            {
+                "id": "POST_BOUNCE_AGENT",
+                "name": "Post-Bounce Collection Agent",
+                "personality": "firm_empathetic"
+            },
+            {
+                "id": "PREDUE_AGENT",
+                "name": "Pre-Due Reminder Agent",
+                "personality": "friendly_helpful"
+            }
+        ]
         
         async with async_session() as session:
-            # Check if exists (table name is agent_configs with underscore)
-            try:
-                result = await session.execute(
-                    text("SELECT id FROM agent_configs WHERE id = :id LIMIT 1"),
-                    {"id": self.agent_config_id}
-                )
-                if result.fetchone():
-                    logger.info(f"Agent config {self.agent_config_id} already exists")
-                    return
-                
-                # Create agent config with camelCase columns
-                await session.execute(text("""
-                    INSERT INTO agent_configs (
-                        id, "organizationId", name, personality,
-                        "createdBy", "createdAt", "updatedAt"
-                    ) VALUES (
-                        :id, :org_id, :name, :personality,
-                        :created_by, NOW(), NOW()
+            for config in agent_configs:
+                try:
+                    # Check if exists
+                    result = await session.execute(
+                        text("SELECT id FROM agent_configs WHERE id = :id LIMIT 1"),
+                        {"id": config["id"]}
                     )
-                """), {
-                    "id": self.agent_config_id,
-                    "org_id": self.organization_id,
-                    "name": "Test Voice Agent Config",
-                    "personality": "professional",
-                    "created_by": self.user_id
-                })
-                await session.commit()
-                logger.info(f"✅ Created agent config: {self.agent_config_id}")
-            except Exception as e:
-                logger.warning(f"Agent config table might not exist: {e}")
-                self.agent_config_id = None
+                    if result.fetchone():
+                        logger.info(f"Agent config {config['id']} already exists")
+                        continue
+                    
+                    # Create agent config with camelCase columns
+                    await session.execute(text("""
+                        INSERT INTO agent_configs (
+                            id, "organizationId", name, personality,
+                            "createdBy", "createdAt", "updatedAt"
+                        ) VALUES (
+                            :id, :org_id, :name, :personality,
+                            :created_by, NOW(), NOW()
+                        )
+                    """), {
+                        "id": config["id"],
+                        "org_id": self.organization_id,
+                        "name": config["name"],
+                        "personality": config["personality"],
+                        "created_by": self.user_id
+                    })
+                    await session.commit()
+                    logger.info(f"✅ Created agent config: {config['id']}")
+                except Exception as e:
+                    logger.warning(f"Error creating agent config {config['id']}: {e}")
+        
+        # Set the first one as default for backwards compatibility
+        self.agent_config_id = "test_agent_config_001"
     
     async def create_interactions(self):
         """Create test interactions with different statuses"""

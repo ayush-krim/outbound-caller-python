@@ -119,39 +119,53 @@ class InteractionService:
             session: Database session
             customer_id: Customer ID
             organization_id: Organization ID
-            agent_id: Agent ID
+            agent_id: Agent ID (this will be used as agentConfigId)
             campaign_id: Optional campaign ID
             
         Returns:
             Created interaction record dict
         """
         try:
-            # Build insert query
+            import uuid
+            from datetime import datetime
+            
+            # Generate a unique ID for the interaction
+            interaction_id = f"interaction_{uuid.uuid4().hex[:12]}_{int(datetime.now().timestamp())}"
+            
+            # Build insert query - use agentConfigId for the AI agent config
             columns = [
+                'id',
                 '"customerId"',
                 '"organizationId"',
-                '"agentId"',
+                '"agentId"',  # This is the human agent - use a default
+                '"agentConfigId"',  # This is the AI agent config
                 'status',
                 'channel',
                 'direction',
+                '"startTime"',  # Required field
                 '"createdAt"',
                 '"updatedAt"'
             ]
             values = [
+                ':id',
                 ':customer_id',
                 ':organization_id',
-                ':agent_id',
+                ':human_agent_id',
+                ':agent_config_id',
                 "'NOT_STARTED'",
                 "'VOICE'",
                 "'OUTBOUND'",
+                'NOW()',  # startTime
                 'NOW()',
                 'NOW()'
             ]
             
             params = {
+                "id": interaction_id,
                 "customer_id": customer_id,
                 "organization_id": organization_id,
-                "agent_id": agent_id
+                "human_agent_id": "test_agent_001",  # Default human agent
+                "agent_config_id": agent_id  # The AI agent config (POST_BOUNCE_AGENT, PREDUE_AGENT, etc.)
             }
             
             if campaign_id:
@@ -162,7 +176,7 @@ class InteractionService:
             query = f"""
             INSERT INTO interactions ({', '.join(columns)})
             VALUES ({', '.join(values)})
-            RETURNING id, status, channel, "customerId", "organizationId", "campaignId", "agentId"
+            RETURNING id, status, channel, "customerId", "organizationId", "campaignId", "agentId", "agentConfigId"
             """
             
             result = await session.execute(text(query), params)
